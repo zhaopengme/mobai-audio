@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from app.auth import verify_api_key
 from app.config import get_settings
@@ -12,6 +12,7 @@ from app.models import (
     ErrorResponse,
     ModelInfo,
     ModelsResponse,
+    ResponseFormatEnum,
     SpeechRequest,
 )
 from app.tts_engine import get_tts_engine
@@ -64,7 +65,23 @@ async def create_speech(
             loop = asyncio.get_event_loop()
             engine = get_tts_engine()
 
-            # 在线程池中执行 TTS 生成
+            # JSON 格式返回 base64 编码的音频
+            if request.response_format == ResponseFormatEnum.json:
+                audio_base64, alignment = await loop.run_in_executor(
+                    _executor,
+                    engine.generate_json,
+                    request.input,
+                    request.voice,
+                    request.speed,
+                )
+
+                response_data = {
+                    "audio_base64": audio_base64,
+                    "alignment": alignment.model_dump() if alignment else None,
+                }
+                return JSONResponse(content=response_data)
+
+            # 其他格式返回音频流
             audio_bytes, content_type = await loop.run_in_executor(
                 _executor,
                 engine.generate,

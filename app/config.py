@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     default_lang: str = "a"
     default_sample_rate: int = 24000
 
+    # Whisper 对齐配置（用于 JSON 格式返回）
+    whisper_model: str = "tiny"
+
     @property
     def api_keys_list(self) -> list[str]:
         """解析 API Keys 为列表"""

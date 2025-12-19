@@ -24,6 +24,7 @@ class ResponseFormatEnum(str, Enum):
     flac = "flac"
     wav = "wav"
     pcm = "pcm"
+    json = "json"
 
 
 class SpeechRequest(BaseModel):
@@ -83,3 +84,18 @@ class ErrorResponse(BaseModel):
     """错误响应"""
 
     error: ErrorDetail
+
+
+class AlignmentInfo(BaseModel):
+    """字符对齐信息"""
+
+    characters: list[str]
+    characterStartTimesSeconds: list[float]
+    characterEndTimesSeconds: list[float]
+
+
+class SpeechJsonResponse(BaseModel):
+    """JSON 格式的语音响应"""
+
+    audio_base64: str
+    alignment: AlignmentInfo | None = None
