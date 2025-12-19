@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     max_workers: int = 4
 
     # MLX-Audio 配置
+    # 模型类型: kokoro, chatterbox
+    model_type: str = "kokoro"
     mlx_model: str = "prince-canuma/Kokoro-82M"
     default_voice: str = "af_heart"
     default_lang: str = "a"

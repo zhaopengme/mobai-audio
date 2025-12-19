@@ -5,7 +5,10 @@
       "WebFetch(domain:platform.openai.com)",
       "WebSearch",
       "Bash(.venv/bin/pip show:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(source:*)",
+      "Bash(python:*)",
+      "Bash(cat:*)"
     ]
   }
 }

@@ -12,7 +12,7 @@ from app.models import AlignmentInfo, ResponseFormatEnum, VoiceEnum
 logger = logging.getLogger(__name__)
 
 # OpenAI 声音到 Kokoro 声音的映射
-VOICE_MAPPING: dict[VoiceEnum, str] = {
+VOICE_MAPPING_KOKORO: dict[VoiceEnum, str] = {
     VoiceEnum.alloy: "af_heart",
     VoiceEnum.echo: "am_adam",
     VoiceEnum.fable: "bf_emma",
@@ -33,21 +33,33 @@ CONTENT_TYPE_MAPPING: dict[ResponseFormatEnum, str] = {
 
 
 class TTSEngine:
-    """TTS 引擎封装"""
+    """TTS 引擎封装，支持多种模型"""
 
     def __init__(self):
-        self._pipeline = None
         self._model = None
+        self._pipeline = None  # Kokoro 专用
         self._whisper_model = None
         self._settings = get_settings()
+        self._model_type = self._settings.model_type
 
     def _ensure_loaded(self):
         """确保模型已加载"""
-        if self._pipeline is not None:
+        if self._model is not None:
             return
 
-        logger.info(f"Loading model: {self._settings.mlx_model}")
+        logger.info(f"Loading model ({self._model_type}): {self._settings.mlx_model}")
 
+        if self._model_type == "kokoro":
+            self._load_kokoro()
+        elif self._model_type == "chatterbox":
+            self._load_chatterbox()
+        else:
+            raise ValueError(f"Unsupported model type: {self._model_type}")
+
+        logger.info("Model loaded successfully")
+
+    def _load_kokoro(self):
+        """加载 Kokoro 模型"""
         from mlx_audio.tts.models.kokoro import KokoroPipeline
         from mlx_audio.tts.utils import load_model
 
@@ -57,7 +69,54 @@ class TTSEngine:
             model=self._model,
             repo_id=self._settings.mlx_model,
         )
-        logger.info("Model loaded successfully")
+
+    def _load_chatterbox(self):
+        """加载 Chatterbox 模型"""
+        from mlx_audio.tts.utils import load_model
+
+        self._model = load_model(self._settings.mlx_model)
+
+    def _generate_audio(self, text: str, voice: VoiceEnum, speed: float) -> tuple[np.ndarray, int]:
+        """生成音频数据，返回 (audio_data, sample_rate)"""
+        self._ensure_loaded()
+
+        if self._model_type == "kokoro":
+            return self._generate_kokoro(text, voice, speed)
+        elif self._model_type == "chatterbox":
+            return self._generate_chatterbox(text, speed)
+        else:
+            raise ValueError(f"Unsupported model type: {self._model_type}")
+
+    def _generate_kokoro(self, text: str, voice: VoiceEnum, speed: float) -> tuple[np.ndarray, int]:
+        """使用 Kokoro 生成音频"""
+        kokoro_voice = VOICE_MAPPING_KOKORO.get(voice, self._settings.default_voice)
+
+        audio_segments = []
+        for _, _, audio in self._pipeline(text, voice=kokoro_voice, speed=speed):
+            audio_segments.append(audio[0])
+
+        if audio_segments:
+            audio_data = np.concatenate(audio_segments)
+        else:
+            audio_data = np.array([], dtype=np.float32)
+
+        return audio_data, self._settings.default_sample_rate
+
+    def _generate_chatterbox(self, text: str, speed: float) -> tuple[np.ndarray, int]:
+        """使用 Chatterbox 生成音频"""
+        # Chatterbox 不支持 voice 和 speed 参数，使用默认设置
+        audio_segments = []
+        for result in self._model.generate(text=text, verbose=False):
+            if result.audio is not None:
+                audio_segments.append(np.array(result.audio))
+
+        if audio_segments:
+            audio_data = np.concatenate(audio_segments)
+        else:
+            audio_data = np.array([], dtype=np.float32)
+
+        # Chatterbox 输出 24kHz
+        return audio_data, 24000
 
     def generate(
         self,
@@ -78,26 +137,11 @@ class TTSEngine:
         Returns:
             (音频数据, content_type)
         """
-        self._ensure_loaded()
+        audio_data, sample_rate = self._generate_audio(text, voice, speed)
 
-        # 映射声音
-        kokoro_voice = VOICE_MAPPING.get(voice, self._settings.default_voice)
-
-        # 生成音频
-        audio_segments = []
-        for _, _, audio in self._pipeline(text, voice=kokoro_voice, speed=speed):
-            audio_segments.append(audio[0])
-
-        # 合并音频片段
-        if audio_segments:
-            audio_data = np.concatenate(audio_segments)
-        else:
-            audio_data = np.array([], dtype=np.float32)
-
-        # 转换格式
         audio_bytes = self._convert_format(
             audio_data,
-            self._settings.default_sample_rate,
+            sample_rate,
             response_format,
         )
 
@@ -121,36 +165,22 @@ class TTSEngine:
         Returns:
             (audio_base64, alignment_or_none)
         """
-        self._ensure_loaded()
-
-        # 映射声音
-        kokoro_voice = VOICE_MAPPING.get(voice, self._settings.default_voice)
-
-        # 生成音频
-        audio_segments = []
-        for _, _, audio in self._pipeline(text, voice=kokoro_voice, speed=speed):
-            audio_segments.append(audio[0])
-
-        # 合并音频片段
-        if audio_segments:
-            audio_data = np.concatenate(audio_segments)
-        else:
-            audio_data = np.array([], dtype=np.float32)
+        audio_data, sample_rate = self._generate_audio(text, voice, speed)
 
         # 转换为 mp3 并编码为 base64
         audio_bytes = self._convert_format(
             audio_data,
-            self._settings.default_sample_rate,
+            sample_rate,
             ResponseFormatEnum.mp3,
         )
         audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
 
         # 使用 Whisper 进行字符对齐
-        alignment = self._align_audio(audio_data, text)
+        alignment = self._align_audio(audio_data, text, sample_rate)
 
         return audio_base64, alignment
 
-    def _align_audio(self, audio_data: np.ndarray, text: str) -> AlignmentInfo | None:
+    def _align_audio(self, audio_data: np.ndarray, text: str, sample_rate: int) -> AlignmentInfo | None:
         """使用 Whisper 进行强制对齐"""
         if len(audio_data) == 0:
             return None
@@ -166,8 +196,8 @@ class TTSEngine:
                 logger.info("Whisper model loaded successfully")
 
             # Whisper 需要 16kHz 采样率，重采样
-            if self._settings.default_sample_rate != 16000:
-                num_samples = int(len(audio_data) * 16000 / self._settings.default_sample_rate)
+            if sample_rate != 16000:
+                num_samples = int(len(audio_data) * 16000 / sample_rate)
                 audio_16k = signal.resample(audio_data, num_samples).astype(np.float32)
             else:
                 audio_16k = audio_data
@@ -187,7 +217,6 @@ class TTSEngine:
 
             for segment in result.segments:
                 for word in segment.words:
-                    # 对每个词的字符进行时间分配
                     word_text = word.word.strip()
                     if not word_text:
                         continue
@@ -217,11 +246,15 @@ class TTSEngine:
 
     def _get_whisper_language(self) -> str:
         """根据 TTS 语言配置返回 Whisper 语言代码"""
+        # Chatterbox 只支持英语
+        if self._model_type == "chatterbox":
+            return "en"
+
         lang_map = {
-            "a": "en",  # 美式英语
-            "b": "en",  # 英式英语
-            "z": "zh",  # 中文
-            "j": "ja",  # 日语
+            "a": "en",
+            "b": "en",
+            "z": "zh",
+            "j": "ja",
         }
         return lang_map.get(self._settings.default_lang, "en")
 
@@ -232,7 +265,6 @@ class TTSEngine:
         target_format: ResponseFormatEnum,
     ) -> bytes:
         """转换音频格式"""
-        # 先写入 WAV 到内存
         wav_buffer = io.BytesIO()
         sf.write(wav_buffer, audio_data, sample_rate, format="WAV")
         wav_buffer.seek(0)
@@ -241,18 +273,16 @@ class TTSEngine:
             return wav_buffer.getvalue()
 
         if target_format == ResponseFormatEnum.pcm:
-            # PCM: 16-bit signed little-endian
             pcm_data = (audio_data * 32767).astype(np.int16)
             return pcm_data.tobytes()
 
-        # 使用 pydub 转换其他格式
         audio_segment = AudioSegment.from_wav(wav_buffer)
         output_buffer = io.BytesIO()
 
         format_map = {
             ResponseFormatEnum.mp3: "mp3",
             ResponseFormatEnum.opus: "opus",
-            ResponseFormatEnum.aac: "adts",  # AAC in ADTS container
+            ResponseFormatEnum.aac: "adts",
             ResponseFormatEnum.flac: "flac",
         }
 
